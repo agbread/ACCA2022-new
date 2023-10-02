@@ -5,12 +5,23 @@ import math as m
 import pandas as pd
 import numpy as np
 import tf
-import csv
 from tf.transformations import euler_from_quaternion
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point, Quaternion
 from sensor_msgs.msg import NavSatFix
 from pyproj import Proj, transform
+
+
+def measure(lat1, lon1, lat2, lon2):
+    R = 6378.137
+    dLat = lat2 * m.pi / 180 - lat1 * m.pi / 180
+    dLon = lon2 * m.pi / 180 - lon1 * m.pi / 180
+    a = m.sin(dLat/2) * m.sin(dLat/2) + \
+        m.cos(lat1 * m.pi / 180) * m.cos(lat2 * m.pi / 180) * \
+        m.sin(dLon/2) * m.sin(dLon/2)
+    c = 2 * m.atan2(m.sqrt(a), m.sqrt(1-a))
+    d = R * c
+    return d * 1000
 
 
 class GPS_Position(object):
@@ -43,25 +54,13 @@ class GPS_Position(object):
         ])
 
         for i in range(2):
-            new_cov[i][i] = cov[i][i] * m.sqrt(dist)
+            new_cov[i][i] = cov[i][i] * m.sqrt(dist) + 0.1
 
         new_cov = list(np.reshape(new_cov, newshape=(36, 1)))
         msg.pose.covariance = new_cov
         # print(msg)
 
         return msg
-
-
-def measure(lat1, lon1, lat2, lon2):
-    R = 6378.137
-    dLat = lat2 * m.pi / 180 - lat1 * m.pi / 180
-    dLon = lon2 * m.pi / 180 - lon1 * m.pi / 180
-    a = m.sin(dLat/2) * m.sin(dLat/2) + \
-        m.cos(lat1 * m.pi / 180) * m.cos(lat2 * m.pi / 180) * \
-        m.sin(dLon/2) * m.sin(dLon/2)
-    c = 2 * m.atan2(m.sqrt(a), m.sqrt(1-a))
-    d = R * c
-    return d * 1000
 
 
 class GPS_Localizer(object):
@@ -71,42 +70,23 @@ class GPS_Localizer(object):
         self.gps_pub = rospy.Publisher(
             "/odometry/gps", Odometry, queue_size=5)
 
-        data = pd.read_csv("/home/acca/catkin_ws/src/ACCA2022-new/gps_localizer/src/k-city_03test.csv")
-        
-        #print(data)
-        MAP_array = []
-        UTM_array = []
-        
-        MAP_x = []
-        MAP_y = []
-        UTM_x = []
-        UTM_y = []
+        # Map Frame (m)
+        self.A1 = [-12.008216791152954, 1.8138237690925598]
+        self.A2 = [51.58015068054199, -3.5253489112854002]
+        self.A3 = [-3.240585916042328, -71.910366439819342]
 
-        for i in data.MAP_x:
-            MAP_x.append(i)
-        for i in data.MAP_y:
-            MAP_y.append(i)
-        for i in data.UTM_x:
-            UTM_x.append(i)
-        for i in data.UTM_y:
-            UTM_y.append(i)
+        # UTM (scale: unknown)
+        self.B1 = [952220.27949039731, 1943998.3930866024]
+        self.B2 = [952274.35303833662, 1943964.6235879373]
+        self.B3 = [952194.09346341831, 1943928.4288452363]
 
-        l = len(UTM_x)
-        for i in range(l):
-            UTM_array.append((UTM_x[i], UTM_y[i]))
-        print(UTM_array)
-        for i in range(l):
-            MAP_array.append((MAP_x[i], MAP_y[i]))
-        print(MAP_array)
-
-        self.MAP_array = MAP_array
-        self.UTM_array = UTM_array
-        # print(self.MAP_array)
-        D_map = m.sqrt((self.MAP_array[0][0] - self.MAP_array[1][0]) ** 2 + (self.MAP_array[0][1] - self.MAP_array[1][1]) ** 2)
-        D_utm = m.sqrt((self.UTM_array[0][0] - self.UTM_array[1][0]) ** 2 + (self.UTM_array[0][1] - self.UTM_array[1][1]) ** 2)
-        print(D_map)
+        D_utm = m.sqrt((self.B3[0] - self.B2[0])
+                       ** 2 + (self.B3[1] - self.B2[1]) ** 2)
+        D_map = m.sqrt((self.A3[0] - self.A2[0])
+                       ** 2 + (self.A3[1] - self.A2[1]) ** 2)
         self.R = D_map / D_utm
         print(self.R)
+
     def GpsCallback(self, msg):
         self.position_coordinate(msg)
 
@@ -125,47 +105,22 @@ class GPS_Localizer(object):
         UTM_x, UTM_y = transform(
             proj_WGS84, proj_UTMK, longitude, latitude)
 
-        d_array = []
-        min_d = []
-
-        for i in self.UTM_array:
-            d = m.sqrt((UTM_x - i[0]) ** 2 + (UTM_y - i[1]) ** 2)
-            d_array.append(d)
-
-        d_pop = list(d_array)
-        d_pop.sort()
-
-        for i in range(3):
-            pop = d_pop.pop(0)
-            min_d.append(pop)
-
-        first = d_array.index(min_d[0])
-        second = d_array.index(min_d[1])
-        third = d_array.index(min_d[2])
-
-        print(first, second, third)
-
-        A1 = self.MAP_array[first]
-        A2 = self.MAP_array[second]
-        A3 = self.MAP_array[third]
-
-        B1 = self.UTM_array[first]
-        B2 = self.UTM_array[second]
-        B3 = self.UTM_array[third]
-
         # distance
-        D1 = (m.sqrt(
-            (UTM_x - B1[0]) ** 2 + (UTM_y - B1[1]) ** 2)) * self.R
-        D2 = (m.sqrt(
-            (UTM_x - B2[0]) ** 2 + (UTM_y - B2[1]) ** 2)) * self.R
-        D3 = (m.sqrt(
-            (UTM_x - B3[0]) ** 2 + (UTM_y - B3[1]) ** 2)) * self.R
-        print(D1, D2, D3)
-        S = (A3[0] ** 2 - A2[0] ** 2 + A3[1] ** 2 - A2[1] ** 2 + D2 ** 2 - D3 ** 2) / 2
-        T = (A1[0] ** 2 - A2[0] ** 2 + A1[1] ** 2 - A2[1] ** 2 + D2 ** 2 - D1 ** 2) / 2
+        self.D1 = (m.sqrt(
+            (UTM_x - self.B1[0]) ** 2 + (UTM_y - self.B1[1]) ** 2)) * self.R
+        self.D2 = (m.sqrt(
+            (UTM_x - self.B2[0]) ** 2 + (UTM_y - self.B2[1]) ** 2)) * self.R
+        self.D3 = (m.sqrt(
+            (UTM_x - self.B3[0]) ** 2 + (UTM_y - self.B3[1]) ** 2)) * self.R
 
-        y = ((T * (A2[0] - A3[0])) - (S * (A2[0] - A1[0]))) / (((A1[1] - A2[1]) * (A2[0] - A3[0])) - ((A3[1] - A2[1]) * (A2[0] - A1[0])))
-        x = ((y * (A1[1] - A2[1]) - T) / (A2[0] - A1[0]))
+        S = (self.A3[0] ** 2 - self.A2[0] ** 2 + self.A3[1] **
+             2 - self.A2[1] ** 2 + self.D2 ** 2 - self.D3 ** 2) / 2
+        T = (self.A1[0] ** 2 - self.A2[0] ** 2 + self.A1[1] **
+             2 - self.A2[1] ** 2 + self.D2 ** 2 - self.D1 ** 2) / 2
+
+        y = ((T * (self.A2[0] - self.A3[0])) - (S * (self.A2[0] - self.A1[0]))) / (((self.A1[1] - self.A2[1])
+                                                                                    * (self.A2[0] - self.A3[0])) - ((self.A3[1] - self.A2[1]) * (self.A2[0] - self.A1[0])))
+        x = ((y * (self.A1[1] - self.A2[1]) - T) / (self.A2[0] - self.A1[0]))
 
         # float, float, (3, 3) matrix
         msg = GPS_Position(x, y, covariance).transformOdometry()
@@ -174,9 +129,6 @@ class GPS_Localizer(object):
 
 if __name__ == "__main__":
     rospy.init_node('gps_localizer')
-
-    print(measure(37.4966977, 126.9575288,
-                  37.4966977 + 1, 126.9575288))
 
     # main object
     gpsLocal = GPS_Localizer()
